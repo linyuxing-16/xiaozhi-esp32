@@ -536,3 +536,53 @@ This protocol carries JSON text and binary Opus frames over a WebSocket connecti
 - **Extensibility**: extra fields in JSON, additional headers for authentication.
 
 Server and device must agree on the meaning, timing, and error handling of each message type so the session runs smoothly. The text above provides the baseline for integration, debugging, and extension.
+
+---
+
+## 11. 视频帧上行（type=2）
+
+本节描述可选的视频帧上行扩展。设备在会话进行中（`listening` / `speaking` 状态）通过同一条 WebSocket 二进制通道上送 JPEG 视频帧。
+
+### 11.1 帧格式
+
+二进制帧使用 `BinaryProtocol4`（对应 `main/protocols/protocol.h`），多字节字段均为**网络字节序（大端）**：
+
+| 偏移 | 长度 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 0 | 1 | `type` | 消息类型，`2` 表示视频 JPEG 帧；音频帧仍为 `0` |
+| 1 | 1 | `reserved` | 保留，固定 `0` |
+| 2 | 4 | `timestamp` | 单调时间戳（毫秒），`htonl` 编码 |
+| 6 | 4 | `payload_size` | JPEG 负载长度（字节），`htonl` 编码 |
+| 10 | N | `payload` | JPEG 图像数据 |
+
+服务器必须先读取 `type` 再决定按音频（Opus）还是视频（JPEG）解析。接收端不得依赖 WebSocket 帧边界来区分音视频。
+
+### 11.2 能力协商
+
+当固件编译时打开 `CONFIG_XIAOZHI_VIDEO_STREAM`，设备在 hello 消息的 `features` 中声明：
+
+```json
+{
+  "type": "hello",
+  "version": 1,
+  "features": {
+    "mcp": true,
+    "video": true
+  }
+}
+```
+
+服务器只有在看到 `features.video === true` 时才应处理 `type=2` 的二进制帧；未声明时应忽略这类帧。
+
+### 11.3 推流时机
+
+- 设备进入 `listening` 或 `speaking` 状态后开始推流；回到 `idle` 时停止。
+- 收发节奏由 `CONFIG_XIAOZHI_VIDEO_STREAM_FPS`（默认 10，范围 1–30）控制。
+- 设备侧最多缓存 2 帧，队列满时丢弃最旧帧（丢旧帧背压），不阻塞音频路径。
+
+### 11.4 适用范围与限制
+
+- 当前仅 `lckfb/szpi-esp32s3` 板型的构建变体通过 `config.json` 的 `sdkconfig_append` 打开 `CONFIG_XIAOZHI_VIDEO_STREAM=y`，其他板子默认关闭。
+- 该板型摄像头改为 **JPEG 直出**（`PIXFORMAT_JPEG`、`fb_count=2`、`CAMERA_GRAB_LATEST`），因此 **LCD 拍照预览功能失效**（方案 B，已知并接受）；MCP 拍照与视觉识别（`Explain`）不受影响。
+- 带宽不足时目前没有自动降 fps 逻辑，需要手动调低 `CONFIG_XIAOZHI_VIDEO_STREAM_FPS`（自动降级为 TODO）。
+

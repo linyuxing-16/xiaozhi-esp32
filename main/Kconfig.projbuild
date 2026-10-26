@@ -1155,6 +1155,44 @@ menu "Camera Configuration"
             Use hardware JPEG decoder on ESP32-P4 to decode JPEG to image.
             See https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/jpeg.html for more details.
 
+    config XIAOZHI_VIDEO_STREAM
+        bool "Enable camera video streaming to server"
+        default n
+        help
+            Stream JPEG video frames to the server over the WebSocket binary
+            channel while the device is in the listening or speaking state.
+
+            Only the lckfb/szpi-esp32s3 board enables this option by default.
+            Frames are wrapped in BinaryProtocol4 with type=2, see
+            docs/websocket.md for the wire format.
+
+    config XIAOZHI_VIDEO_STREAM_FPS
+        int "Video stream frames per second"
+        depends on XIAOZHI_VIDEO_STREAM
+        range 1 30
+        default 10
+        help
+            Target number of video frames sent per second. Reduce this value
+            when the uplink bandwidth is insufficient.
+
+    config XIAOZHI_VIDEO_STREAM_WIDTH
+        int "Video stream frame width"
+        depends on XIAOZHI_VIDEO_STREAM
+        range 160 1280
+        default 320
+        help
+            Requested video frame width. The actual size still follows the
+            board camera configuration; this value is a hint for future use.
+
+    config XIAOZHI_VIDEO_STREAM_HEIGHT
+        int "Video stream frame height"
+        depends on XIAOZHI_VIDEO_STREAM
+        range 160 1280
+        default 240
+        help
+            Requested video frame height. The actual size still follows the
+            board camera configuration; this value is a hint for future use.
+
     config XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
         bool "Enable Camera Debug Mode"
         default n

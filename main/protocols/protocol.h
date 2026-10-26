@@ -3,6 +3,8 @@
 
 #include <cJSON.h>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -30,6 +32,26 @@ struct BinaryProtocol3 {
     uint8_t reserved;
     uint16_t payload_size;
     uint8_t payload[];
+} __attribute__((packed));
+
+/**
+ * 二进制协议 v4：视频帧上行封装。
+ *
+ * 帧格式（网络字节序，即大端）：
+ *   type(1)         消息类型，2 表示视频 JPEG 帧
+ *   reserved(1)     保留字节，固定为 0
+ *   timestamp(4)    单调时间戳，毫秒，网络字节序
+ *   payload_size(4) JPEG 负载长度，网络字节序
+ *   payload[]       JPEG 负载
+ *
+ * 注意：音视频共用同一条 WebSocket 二进制通道，接收端须先读 type 再分派。
+ */
+struct BinaryProtocol4 {
+    uint8_t type;           // 2: video JPEG frame
+    uint8_t reserved;       // reserved, must be 0
+    uint32_t timestamp;     // timestamp in milliseconds, network byte order
+    uint32_t payload_size;  // payload size in bytes, network byte order
+    uint8_t payload[];      // JPEG payload
 } __attribute__((packed));
 
 enum AbortReason { kAbortReasonNone, kAbortReasonWakeWordDetected };
@@ -61,6 +83,21 @@ public:
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
+
+    /**
+     * 发送一帧视频（JPEG）。默认实现返回 false，表示当前传输不支持视频上行。
+     *
+     * @param data         JPEG 数据
+     * @param len          JPEG 数据长度
+     * @param timestamp_ms 单调时间戳（毫秒）
+     * @return true 表示已成功交给传输层
+     */
+    virtual bool SendVideoFrame(const uint8_t* data, size_t len, uint32_t timestamp_ms) {
+        (void)data;
+        (void)len;
+        (void)timestamp_ms;
+        return false;
+    }
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();

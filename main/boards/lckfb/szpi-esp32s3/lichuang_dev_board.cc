@@ -254,12 +254,15 @@ private:
         config.pin_pwdn = CAMERA_PIN_PWDN;
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
-        config.pixel_format = PIXFORMAT_RGB565;
+        // 方案 B：摄像头 JPEG 直出，供视频推流直接上行。
+        // 注意：JPEG 直出后 LCD 拍照预览会失效（方案 B，已接受）；
+        // MCP 拍照（self.camera.take_photo）与视觉识别（Explain）不受影响。
+        config.pixel_format = PIXFORMAT_JPEG;
         config.frame_size = FRAMESIZE_QVGA;
         config.jpeg_quality = 12;
-        config.fb_count = 1;
+        config.fb_count = 2;
         config.fb_location = CAMERA_FB_IN_PSRAM;
-        config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+        config.grab_mode = CAMERA_GRAB_LATEST;
 
         camera_ = new Esp32Camera(config);
     }

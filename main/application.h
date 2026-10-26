@@ -5,6 +5,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
 #include <esp_timer.h>
+#include <sdkconfig.h>
 
 #include <string>
 #include <mutex>
@@ -158,6 +159,18 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    // 视频帧背压队列：最多缓存 2 帧，满时丢弃最旧帧
+    static constexpr size_t kVideoQueueSize = 2;
+    struct VideoFrameSlot {
+        std::vector<uint8_t> data;
+        uint32_t timestamp_ms = 0;
+    };
+    std::mutex video_mutex_;
+    std::deque<VideoFrameSlot> video_queue_;
+    bool video_stream_active_ = false;
+    bool video_send_pending_ = false;
+#endif  // CONFIG_XIAOZHI_VIDEO_STREAM
 
     // Event handlers
     void HandleStateChangedEvent();
@@ -177,6 +190,8 @@ private:
     void HideStartupWakeWordHint();
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
     void StopNotification();
+    void StartVideoStream();
+    void StopVideoStream();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
 
     // Activation task (runs in background)

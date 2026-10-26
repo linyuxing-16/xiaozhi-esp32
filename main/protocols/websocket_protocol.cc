@@ -53,6 +53,33 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 }
 
+bool WebsocketProtocol::SendVideoFrame(const uint8_t* data, size_t len, uint32_t timestamp_ms) {
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    if (data == nullptr || len == 0) {
+        return false;
+    }
+
+    std::string serialized;
+    serialized.resize(sizeof(BinaryProtocol4) + len);
+    auto bp4 = (BinaryProtocol4*)serialized.data();
+    bp4->type = 2;  // 2: video JPEG frame
+    bp4->reserved = 0;
+    bp4->timestamp = htonl(timestamp_ms);
+    bp4->payload_size = htonl(static_cast<uint32_t>(len));
+    memcpy(bp4->payload, data, len);
+
+    return websocket_->Send(serialized.data(), serialized.size(), true);
+#else
+    (void)data;
+    (void)len;
+    (void)timestamp_ms;
+    return false;
+#endif  // CONFIG_XIAOZHI_VIDEO_STREAM
+}
+
 bool WebsocketProtocol::SendText(const std::string& text) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
         return false;
@@ -217,6 +244,10 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    // 能力协商：声明设备支持视频帧上行（type=2）
+    cJSON_AddBoolToObject(features, "video", true);
+#endif
     cJSON_AddItemToObject(root, "features", features);
     AddTextFontCapabilities(root);
     cJSON_AddStringToObject(root, "transport", "websocket");

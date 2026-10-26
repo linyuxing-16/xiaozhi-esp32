@@ -333,6 +333,8 @@ void Application::HandleNetworkDisconnectedEvent() {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
         protocol_->CloseAudioChannel();
     }
+    // 网络断开时确保推流停止
+    StopVideoStream();
 
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
@@ -583,6 +585,8 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
+            // 通道关闭后停止推流
+            StopVideoStream();
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -1020,6 +1024,8 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            // 空闲状态停止视频推流（D10：仅 listening/speaking 推流）
+            StopVideoStream();
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
@@ -1040,6 +1046,8 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            // 监听状态开始视频推流
+            StartVideoStream();
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -1058,6 +1066,8 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            // 说话状态继续保持视频推流
+            StartVideoStream();
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -1079,6 +1089,95 @@ void Application::HandleStateChangedEvent() {
             // Do nothing
             break;
     }
+}
+
+void Application::StartVideoStream() {
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    if (video_stream_active_) {
+        return;
+    }
+    if (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+    auto camera = Board::GetInstance().GetCamera();
+    if (camera == nullptr) {
+        return;
+    }
+
+    // 回调运行在摄像头线程：只做拷贝入队，网络发送交给主任务
+    camera->OnFrame([this](const VideoFrame& frame) {
+        if (frame.data == nullptr || frame.len == 0) {
+            return;
+        }
+
+        bool need_schedule = false;
+        {
+            std::lock_guard<std::mutex> lock(video_mutex_);
+            if (video_queue_.size() >= kVideoQueueSize) {
+                // 背压：满了丢弃最旧帧，保证低延迟
+                video_queue_.pop_front();
+            }
+            VideoFrameSlot slot;
+            slot.data.assign(frame.data, frame.data + frame.len);
+            slot.timestamp_ms = frame.timestamp_ms;
+            video_queue_.push_back(std::move(slot));
+
+            if (!video_send_pending_) {
+                video_send_pending_ = true;
+                need_schedule = true;
+            }
+        }
+
+        if (need_schedule) {
+            Schedule([this]() {
+                std::vector<VideoFrameSlot> frames;
+                {
+                    std::lock_guard<std::mutex> lock(video_mutex_);
+                    while (!video_queue_.empty()) {
+                        frames.push_back(std::move(video_queue_.front()));
+                        video_queue_.pop_front();
+                    }
+                    video_send_pending_ = false;
+                }
+                if (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()) {
+                    return;
+                }
+                for (auto& frame : frames) {
+                    if (!protocol_->SendVideoFrame(frame.data.data(), frame.data.size(),
+                                                   frame.timestamp_ms)) {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    if (!camera->StartStream(CONFIG_XIAOZHI_VIDEO_STREAM_FPS, CONFIG_XIAOZHI_VIDEO_STREAM_WIDTH,
+                             CONFIG_XIAOZHI_VIDEO_STREAM_HEIGHT)) {
+        // 摄像头不支持推流：撤销回调，避免残留
+        camera->OnFrame(nullptr);
+        return;
+    }
+    video_stream_active_ = true;
+    ESP_LOGI(TAG, "Video stream started (%d fps)", CONFIG_XIAOZHI_VIDEO_STREAM_FPS);
+#endif  // CONFIG_XIAOZHI_VIDEO_STREAM
+}
+
+void Application::StopVideoStream() {
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    if (video_stream_active_) {
+        auto camera = Board::GetInstance().GetCamera();
+        if (camera != nullptr) {
+            camera->StopStream();
+            camera->OnFrame(nullptr);
+        }
+        video_stream_active_ = false;
+        ESP_LOGI(TAG, "Video stream stopped");
+    }
+    std::lock_guard<std::mutex> lock(video_mutex_);
+    video_queue_.clear();
+    video_send_pending_ = false;
+#endif  // CONFIG_XIAOZHI_VIDEO_STREAM
 }
 
 void Application::ShowStartupWakeWordHint() {
@@ -1449,6 +1548,8 @@ void Application::ResetProtocol() {
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();
         }
+        // 协议重置前先停止推流
+        StopVideoStream();
         // Reset protocol
         protocol_.reset();
     });

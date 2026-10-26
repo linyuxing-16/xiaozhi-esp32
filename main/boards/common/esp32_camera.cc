@@ -5,6 +5,10 @@
 #include <img_converters.h>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <vector>
+
+#include <freertos/task.h>
 
 #include "board.h"
 #include "display.h"
@@ -53,6 +57,8 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
 }
 
 Esp32Camera::~Esp32Camera() {
+    // 先停推流线程，再回收摄像头资源
+    StopStream();
     if (streaming_on_) {
         if (current_fb_) {
             esp_camera_fb_return(current_fb_);
@@ -172,6 +178,125 @@ bool Esp32Camera::SetVFlip(bool enabled) {
 bool Esp32Camera::SetSwapBytes(bool enabled) {
     swap_bytes_enabled_ = enabled;
     return true;
+}
+
+bool Esp32Camera::StartStream(int fps, int width, int height) {
+#if CONFIG_XIAOZHI_VIDEO_STREAM
+    (void)width;  // 分辨率由板级 camera_config_t 决定，这里不重新配置传感器
+    (void)height;
+
+    if (!streaming_on_) {
+        ESP_LOGE(TAG, "StartStream ignored: camera is not initialized");
+        return false;
+    }
+    if (stream_running_.load()) {
+        return true;
+    }
+    if (fps <= 0) {
+        fps = 10;
+    } else if (fps > 30) {
+        fps = 30;
+    }
+    stream_fps_ = fps;
+
+    stream_running_.store(true);
+    stream_thread_ = std::thread([this]() {
+        int fail_count = 0;
+        while (stream_running_.load()) {
+            camera_fb_t* fb = esp_camera_fb_get();
+            if (fb == nullptr) {
+                // 取帧失败直接丢帧继续，避免刷屏日志
+                if (fail_count++ < 3) {
+                    ESP_LOGW(TAG, "Stream: camera frame fetch failed");
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000 / stream_fps_));
+                continue;
+            }
+            fail_count = 0;
+
+            const uint32_t timestamp_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+            if (fb->format == PIXFORMAT_JPEG) {
+                // JPEG 直出：数据只在回调期间有效，调用者必须自行拷贝
+                if (on_frame_) {
+                    VideoFrame frame{fb->buf, fb->len, timestamp_ms};
+                    on_frame_(frame);
+                }
+            } else {
+                // 非 JPEG 格式：复用现有软件编码器转成 JPEG 后回调
+                v4l2_pix_fmt_t enc_fmt;
+                bool format_supported = true;
+                switch (fb->format) {
+                    case PIXFORMAT_RGB565:
+                        enc_fmt = V4L2_PIX_FMT_RGB565;
+                        break;
+                    case PIXFORMAT_YUV422:
+                        enc_fmt = V4L2_PIX_FMT_YUYV;
+                        break;
+                    case PIXFORMAT_YUV420:
+                        enc_fmt = V4L2_PIX_FMT_YUV420;
+                        break;
+                    case PIXFORMAT_GRAYSCALE:
+                        enc_fmt = V4L2_PIX_FMT_GREY;
+                        break;
+                    case PIXFORMAT_RGB888:
+                        enc_fmt = V4L2_PIX_FMT_RGB24;
+                        break;
+                    default:
+                        format_supported = false;
+                        break;
+                }
+
+                if (format_supported) {
+                    std::lock_guard<std::mutex> lock(stream_mutex_);
+                    stream_jpeg_buf_.clear();
+                    bool ok = image_to_jpeg_cb(
+                        fb->buf, fb->len, fb->width, fb->height, enc_fmt, 80,
+                        [](void* arg, size_t index, const void* data, size_t len) -> size_t {
+                            if (index == 0 && data != nullptr && len > 0) {
+                                auto* out = static_cast<std::vector<uint8_t>*>(arg);
+                                const auto* bytes = static_cast<const uint8_t*>(data);
+                                out->insert(out->end(), bytes, bytes + len);
+                            }
+                            return len;
+                        },
+                        &stream_jpeg_buf_);
+                    if (ok && !stream_jpeg_buf_.empty() && on_frame_) {
+                        VideoFrame frame{stream_jpeg_buf_.data(), stream_jpeg_buf_.size(),
+                                         timestamp_ms};
+                        on_frame_(frame);
+                    } else if (!ok) {
+                        ESP_LOGW(TAG, "Stream: JPEG encode failed (format=%d)", fb->format);
+                    }
+                }
+            }
+
+            esp_camera_fb_return(fb);
+            vTaskDelay(pdMS_TO_TICKS(1000 / stream_fps_));
+        }
+    });
+    ESP_LOGI(TAG, "Video stream started at %d fps", stream_fps_);
+    return true;
+#else
+    (void)fps;
+    (void)width;
+    (void)height;
+    return false;
+#endif  // CONFIG_XIAOZHI_VIDEO_STREAM
+}
+
+void Esp32Camera::StopStream() {
+    stream_running_.store(false);
+    if (!stream_thread_.joinable()) {
+        return;
+    }
+    if (stream_thread_.get_id() == std::this_thread::get_id()) {
+        // 理论上不会发生；避免在推流线程内 join 自身
+        stream_thread_.detach();
+        return;
+    }
+    stream_thread_.join();
+    ESP_LOGI(TAG, "Video stream stopped");
 }
 
 std::expected<std::string, std::string> Esp32Camera::Explain(const std::string& question) {
