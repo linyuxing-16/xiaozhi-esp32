@@ -254,10 +254,10 @@ private:
         config.pin_pwdn = CAMERA_PIN_PWDN;
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
-        // 方案 B：摄像头 JPEG 直出，供视频推流直接上行。
-        // 注意：JPEG 直出后 LCD 拍照预览会失效（方案 B，已接受）；
-        // MCP 拍照（self.camera.take_photo）与视觉识别（Explain）不受影响。
-        config.pixel_format = PIXFORMAT_JPEG;
+        // 本板摄像头为 GC2145，驱动不支持 JPEG 直出（esp_camera_init 会返回
+        // ESP_ERR_NOT_SUPPORTED），因此改用 RGB565 采集，由 Esp32Camera 的软件
+        // JPEG 编码路径转码后上行。
+        config.pixel_format = PIXFORMAT_RGB565;
         config.frame_size = FRAMESIZE_QVGA;
         config.jpeg_quality = 12;
         config.fb_count = 2;

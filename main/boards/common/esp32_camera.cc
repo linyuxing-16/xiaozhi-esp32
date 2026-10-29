@@ -8,6 +8,7 @@
 #include <mutex>
 #include <vector>
 
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include "board.h"
